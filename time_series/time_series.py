@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import torch
+import numpy as np
 
 from loguru import logger
 
@@ -85,6 +86,48 @@ class TimeSeries:
                     f"not including series '{series_name}' in TimeSeries object because the type "
                     f"'{values.dtype}' cannot be converted to a pytorch tensor."
                 )
+
+        return TimeSeries(series_dictionary=series_dictionary)
+
+    @staticmethod
+    def create_from_fmri_npz(filename: str) -> TimeSeries:
+        """
+        Initializes a TimeSeries object from a .npz file of an fMRI dataset.
+
+        Expects the .npz to contain:
+            - 'data': 2D numpy array with time series values
+            - 'roi_names': an array-like of column names (optional)
+        """
+        npz = np.load(filename, allow_pickle=True)
+
+        if "data" not in npz:
+            logger.error(f"npz file '{filename}' does not contain a 'data' array")
+            raise ValueError("npz file missing 'data' array")
+
+        data = npz["data"]
+
+        roi_names = None
+        if "roi_names" in npz:
+            roi_names = npz["roi_names"]
+            roi_names = [n.decode("utf-8") if isinstance(n, (bytes, bytearray)) else str(n) for n in roi_names]
+        else:
+            roi_names = [f"series_{i}" for i in range(data.shape[1])]
+
+        # prepare column arrays
+        if data.ndim == 1:
+            cols = [data]
+        elif data.ndim == 2:
+            cols = [data[:, i] for i in range(data.shape[1])]
+        else:
+            logger.error("Unsupported 'data' shape in npz; expected 1D or 2D array")
+            raise ValueError("Unsupported 'data' shape in npz; expected 1D or 2D array")
+
+        # ensure matching lengths
+        assert len(roi_names) == len(cols), f"Length of 'roi_names' ({len(roi_names)}) does not match number of data columns ({len(cols)})"
+
+        series_dictionary = {}
+        for name, col in zip(roi_names, cols):
+            series_dictionary[name] = torch.tensor(col)
 
         return TimeSeries(series_dictionary=series_dictionary)
 
