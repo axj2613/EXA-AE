@@ -75,8 +75,12 @@ class LamarckianBlockWeightGenerator(WeightGenerator):
             for i, existing in enumerate(node.weights):
                 if existing is None:
                     continue
+                # move every parent's weight onto the child weight's device before blending:
+                # parents may live on different devices (e.g. a checkpoint-restored genome on CPU
+                # alongside a freshly trained one on cuda), and mixing devices in the arithmetic
+                # below would raise "Expected all tensors to be on the same device".
                 candidates = [
-                    weights[i].detach()
+                    weights[i].detach().to(existing.device)
                     for weights in parent_weight_lists
                     if weights[i] is not None and weights[i].shape == existing.shape
                 ]
@@ -94,11 +98,18 @@ class LamarckianBlockWeightGenerator(WeightGenerator):
                 if edge.innovation_number in parent.edge_map
             ]
             for i in range(len(edge.weights)):
+                # target device: the child edge's own weight if set, else the first parent's --
+                # move all parent candidates onto it so mixed-device parents don't crash the blend
+                # (the child genome is moved to its final device by genome.to(device) afterward).
+                target_device = edge.weights[i].device if edge.weights[i] is not None else None
                 candidates = [
                     weights[i].detach()
                     for weights in parent_weight_lists
                     if weights[i] is not None
                 ]
+                if candidates and target_device is None:
+                    target_device = candidates[0].device
+                candidates = [candidate.to(target_device) for candidate in candidates] if candidates else candidates
                 if len(candidates) >= 2:
                     more_fit = candidates[0]
                     others_avg = torch.stack(candidates[1:], dim=0).mean(dim=0)

@@ -19,10 +19,15 @@ def save_checkpoint(path: str, population_strategy, generation: int, config: dic
     completed-generation index, and the Python/NumPy/Torch RNG states (so sampling and mutation
     continue deterministically rather than repeating the pre-checkpoint random draws).
 
-    Genomes are moved to CPU before pickling so the checkpoint loads on any device; the caller
-    re-homes them with genome.to(device) after loading.
+    Genomes are moved to CPU before pickling so the checkpoint loads on any device, then moved
+    BACK to their original device afterward. Restoring the device is essential: leaving the live
+    population on CPU while newly-generated children go to the GPU would create a device-mixed
+    population, and crossover's weight blending across two differently-homed parents would raise
+    "Expected all tensors to be on the same device".
     """
-    for genome in _all_genomes(population_strategy):
+    genomes = _all_genomes(population_strategy)
+    original_devices = [getattr(genome, "device", torch.device("cpu")) for genome in genomes]
+    for genome in genomes:
         genome.to("cpu")
 
     state = {
@@ -39,6 +44,9 @@ def save_checkpoint(path: str, population_strategy, generation: int, config: dic
     with open(tmp_path, "wb") as checkpoint_file:
         pickle.dump(state, checkpoint_file)
     os.replace(tmp_path, path)  # atomic: a crash mid-write can't corrupt the last good checkpoint
+
+    for genome, device in zip(genomes, original_devices):
+        genome.to(device)
 
 
 def load_checkpoint(path: str) -> dict:

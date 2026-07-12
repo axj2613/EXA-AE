@@ -26,7 +26,13 @@ def read_npz_data_length(path: str, key: str = "data") -> int:
     """Returns the number of timepoints (shape[0]) of a recording's 'data' array by reading ONLY
     the .npy header inside the .npz zip, without decompressing the array -- ~16x faster than
     np.load(...)[key].shape, so pre-scanning all ~19k recordings' lengths at startup is cheap.
-    Falls back to a full load if the fast header read fails for any reason."""
+
+    Robust to unreadable files: real corpora contain the occasional truncated/corrupt/zero-byte
+    recording (e.g. an incomplete upload). If the fast header read fails, it falls back to a full
+    np.load; if THAT also fails, the file is genuinely unreadable, so it logs a warning naming the
+    file and returns 0 -- which makes the dataset exclude it (0 < any window_length) instead of
+    crashing the whole run. A flood of these warnings means the data path or upload is broken, not
+    just one bad file."""
     try:
         with zipfile.ZipFile(path) as zip_file:
             with zip_file.open(key + ".npy") as entry:
@@ -38,8 +44,15 @@ def read_npz_data_length(path: str, key: str = "data") -> int:
                 else:
                     raise ValueError(f"unsupported npy version {version}")
         return int(shape[0])
-    except Exception:
-        return int(np.load(path)[key].shape[0])
+    except Exception as header_error:
+        try:
+            return int(np.load(path)[key].shape[0])
+        except Exception as load_error:
+            logger.warning(
+                f"cannot read '{path}' ({type(header_error).__name__} / {type(load_error).__name__}); "
+                "excluding it (length treated as 0)"
+            )
+            return 0
 
 
 class HCPWindowDataset:
@@ -326,6 +339,10 @@ class HCPWindowDataset:
         windows = []
         for recording_name, path in self.subject_recordings.get(subject_id, {}).items():
             if recording_type(recording_name) not in types:
+                continue
+            # skip recordings too short (or unreadable -> length 0 in the index) to avoid loading
+            # a corrupt file here, mirroring the sampling-pool exclusion
+            if self.lengths.get(f"{subject_id}/{recording_name}", 0) < window_length:
                 continue
             data = self._load(subject_id, recording_name, path)  # (parcels, time)
             series_length = data.shape[1]
