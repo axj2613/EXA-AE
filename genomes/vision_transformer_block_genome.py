@@ -115,6 +115,9 @@ class VisionTransformerBlockGenome(Genome):
         self.capture_latent = False
         self.latent: torch.Tensor | None = None
 
+        # size/complexity report, populated by train() (see parameter_report)
+        self.complexity: dict | None = None
+
         # device the genome's tensors currently live on; updated by to() and used by forward/train
         # to place freshly-created tensors (masking noise, zero-fills, moved batches) correctly.
         self.device = torch.device("cpu")
@@ -188,6 +191,62 @@ class VisionTransformerBlockGenome(Genome):
             parameters.append(self.cls_token)
 
         return parameters
+
+    def _fixed_scaffolding_parameters(self) -> int:
+        """Trainable parameter count of the FIXED (non-evolved) scaffolding -- constant across all
+        genomes (patch embed, spatial-coordinate projections, decoder head, cls/mask tokens). The
+        sinusoidal temporal encodings are buffers, so they contribute none."""
+        fixed_modules = [
+            self.patch_embed, self.spatial_pos_embed,
+            self.decoder_spatial_pos_embed, self.decoder_pred1, self.decoder_pred2,
+        ]
+        total = sum(p.numel() for module in fixed_modules for p in module.parameters())
+        total += self.mask_token.numel()
+        if self.use_cls_token:
+            total += self.cls_token.numel()
+        return total
+
+    def parameter_report(self) -> dict:
+        """Reports the genome's size/complexity for the EXAMM-style efficiency analysis (the point
+        of neuro-evolution is finding compact architectures). Counts only the ACTIVE graph -- the
+        nodes/edges actually reachable in the forward pass -- since disabled/unreachable structure
+        is dead weight that contributes nothing to the model's function; call
+        calculate_reachability() first (the population/reproduction machinery already does).
+
+        Returns a dict with:
+            total_active_parameters: fixed scaffolding + active evolved graph (the functional model
+                size to compare against, e.g., BrainLM's 111M/650M).
+            evolved_active_parameters: just the active block nodes + edges.
+            fixed_parameters: the constant scaffolding.
+            num_active_hidden_nodes / num_active_edges: EXAMM-style structure counts.
+            node_type_counts: active hidden-node count per block type.
+        """
+        fixed = self._fixed_scaffolding_parameters()
+
+        evolved_active = 0
+        num_active_nodes = 0
+        node_type_counts: dict[str, int] = {}
+        for node in self.nodes:
+            if getattr(node, "active", False) and not node.is_boundary_node:
+                evolved_active += sum(weight.numel() for weight in node.weights)
+                num_active_nodes += 1
+                type_name = type(node).__name__
+                node_type_counts[type_name] = node_type_counts.get(type_name, 0) + 1
+
+        num_active_edges = 0
+        for edge in self.edges:
+            if getattr(edge, "active", False):
+                evolved_active += sum(weight.numel() for weight in edge.weights if weight is not None)
+                num_active_edges += 1
+
+        return {
+            "total_active_parameters": fixed + evolved_active,
+            "evolved_active_parameters": evolved_active,
+            "fixed_parameters": fixed,
+            "num_active_hidden_nodes": num_active_nodes,
+            "num_active_edges": num_active_edges,
+            "node_type_counts": node_type_counts,
+        }
 
     def to(self, device) -> "VisionTransformerBlockGenome":
         """Moves every tensor the genome owns onto `device`: the fixed scaffolding modules and
@@ -419,12 +478,23 @@ class VisionTransformerBlockGenome(Genome):
 
         self.fitness = self._validation_loss(dataset, batch_size, fitness_batches, amp_enabled)
 
+        # measure size/complexity for the EXAMM-style efficiency analysis and stash it on the
+        # genome so it is saved with the pickle (fitness selection itself stays pure val MSE).
+        self.complexity = self.parameter_report()
+
         # clear gradients/values so the genome's tensors can be cheaply deepcopy'd by mutation/Clone
         self.reset()
         for parameter in self.parameters():
             parameter.grad = None
 
-        print(f"final fitness (validation masked reconstruction MSE): {self.fitness}")
+        print(
+            f"final fitness (validation MSE): {self.fitness:.6f} | "
+            f"active params: {self.complexity['total_active_parameters']:,} "
+            f"({self.complexity['evolved_active_parameters']:,} evolved) | "
+            f"active hidden nodes: {self.complexity['num_active_hidden_nodes']}, "
+            f"edges: {self.complexity['num_active_edges']} | "
+            f"types: {self.complexity['node_type_counts']}"
+        )
 
     def _validation_loss(self, dataset, batch_size, fitness_batches, amp_enabled) -> float:
         """Mean masked-reconstruction loss over validation-split batches, in eval mode (dropout
