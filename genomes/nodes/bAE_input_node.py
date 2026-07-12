@@ -28,6 +28,7 @@ class BidirectionalAEInputNode(BidirectionalAENode):
         )
 
         self.parameter_name = parameter_name
+        self.is_boundary_node = True
 
     def __repr__(self) -> str:
         """Provides an easily readable string representation of this node."""

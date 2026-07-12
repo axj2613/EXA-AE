@@ -28,6 +28,7 @@ class BidirectionalAEEncodingNode(BidirectionalAENode):
             max_sequence_length=max_sequence_length,
         )
         self.parameter_name = parameter_name
+        self.is_boundary_node = True
 
     def __repr__(self) -> str:
         """Provides an easily readable string representation of this node."""

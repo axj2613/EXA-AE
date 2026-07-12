@@ -4,3 +4,6 @@ loguru
 matplotlib
 pandas
 graphviz
+
+boto3
+tqdm

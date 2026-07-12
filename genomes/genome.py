@@ -11,10 +11,6 @@ import torch
 from abc import ABC, abstractmethod
 from genomes.edges.edge import Edge
 from genomes.nodes.node import Node
-from genomes.nodes.input_node import InputNode
-from genomes.nodes.output_node import OutputNode
-from genomes.nodes.bAE_input_node import BidirectionalAEInputNode
-from genomes.nodes.bAE_encoding_node import BidirectionalAEEncodingNode
 from genomes.edges.recurrent_edge import RecurrentEdge
 
 
@@ -89,10 +85,7 @@ class Genome(ABC):
             node: is the node to add to the computational graph
         """
         assert node.innovation_number not in self.node_map.keys()
-        assert not isinstance(node, InputNode)
-        assert not isinstance(node, OutputNode)
-        assert not isinstance(node, BidirectionalAEInputNode)
-        assert not isinstance(node, BidirectionalAEEncodingNode)
+        assert not node.is_boundary_node
         assert len(node.input_edges) == 0
         assert len(node.output_edges) == 0
 
@@ -239,8 +232,7 @@ class Genome(ABC):
                 )
 
         for node in self.nodes:
-            if (not isinstance(node, InputNode) and not isinstance(node, OutputNode)
-                    and not isinstance(node, BidirectionalAEInputNode) and not isinstance(node, BidirectionalAEEncodingNode)):
+            if not node.is_boundary_node:
                 dot.node(f"node {node.innovation_number}", label=f"{node.parameter_name}")
 
         min_weight = math.inf
@@ -295,8 +287,7 @@ class Genome(ABC):
         """
 
         for node in self.nodes:
-            if (not isinstance(node, InputNode) and not isinstance(node, OutputNode)
-                    and not isinstance(node, BidirectionalAEInputNode) and not isinstance(node, BidirectionalAEEncodingNode)):
+            if not node.is_boundary_node:
                 if len(node.input_edges) == 0:
                     print("INVALID GENOME:")
                     print(self)

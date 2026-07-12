@@ -5,10 +5,6 @@ from evolution.edge_generator import EdgeGenerator
 from evolution.node_generator import NodeGenerator
 
 from genomes.genome import Genome
-from genomes.nodes.input_node import InputNode
-from genomes.nodes.output_node import OutputNode
-from genomes.nodes.bAE_input_node import BidirectionalAEInputNode
-from genomes.nodes.bAE_encoding_node import BidirectionalAEEncodingNode
 
 from reproduction.reproduction_method import ReproductionMethod
 
@@ -64,8 +60,7 @@ class SplitNode(ReproductionMethod):
         possible_nodes = [
             node
             for node in child_genome.nodes
-            if not isinstance(node, InputNode) and not isinstance(node, OutputNode)
-            and not isinstance(node, BidirectionalAEInputNode) and not isinstance(node, BidirectionalAEEncodingNode)
+            if not node.is_boundary_node
             and not (self.autoencoder and node.depth == 0.5)
         ]
 

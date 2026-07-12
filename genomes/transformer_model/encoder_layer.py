@@ -12,9 +12,14 @@ class EncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x, mask):
-        attn_output = self.self_attn(x, x, x, mask)
+    def forward(self, x, mask, output_attentions=False):
+        if output_attentions:
+            attn_output, attn_probs = self.self_attn(x, x, x, mask, output_attentions=True)
+        else:
+            attn_output = self.self_attn(x, x, x, mask)
         x = self.norm1(x + self.dropout(attn_output))
         ff_output = self.feed_forward(x)
         x = self.norm2(x + self.dropout(ff_output))
+        if output_attentions:
+            return x, attn_probs
         return x

@@ -38,6 +38,14 @@ class Node(ABC):
 
         self.disabled = False
 
+        # True for nodes that mark a graph boundary (input/output/encoding-input nodes etc.)
+        # which are exempt from the "must have both input and output edges" validity check and
+        # are drawn separately in Genome.plot(). Checked via this attribute (rather than
+        # isinstance against a fixed tuple of subclasses) so alternative node hierarchies, such as
+        # genomes.nodes.block_node.BlockNode, can mark their own boundary node types without
+        # Genome needing to know about them.
+        self.is_boundary_node = False
+
     def __repr__(self) -> str:
         """Provides an easily readable string representation of this node."""
         return (

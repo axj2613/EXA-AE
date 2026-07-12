@@ -5,10 +5,6 @@ from evolution.edge_generator import EdgeGenerator
 from evolution.node_generator import NodeGenerator
 
 from genomes.genome import Genome
-from genomes.nodes.input_node import InputNode
-from genomes.nodes.output_node import OutputNode
-from genomes.nodes.bAE_input_node import BidirectionalAEInputNode
-from genomes.nodes.bAE_encoding_node import BidirectionalAEEncodingNode
 
 from reproduction.add_node import AddNode
 from reproduction.reproduction_method import ReproductionMethod
@@ -75,8 +71,7 @@ class Crossover(ReproductionMethod):
         child_genome = copy.deepcopy(sorted_parents[0])
 
         for node in child_genome.nodes:
-            if (isinstance(node, InputNode) or isinstance(node, OutputNode)
-                    or isinstance(node, BidirectionalAEInputNode) or isinstance(node, BidirectionalAEEncodingNode)):
+            if node.is_boundary_node:
                 # keep the inputs and outputs enabled
                 continue
 
@@ -119,7 +114,12 @@ class Crossover(ReproductionMethod):
                         random.uniform(0.0, 1.0) < self.other_parent_selection_rate
                     )
                     if include_node:
-                        node_copy = copy.copy(other_node)
+                        # deepcopy (not copy.copy): a shallow copy would share this node's
+                        # internal weight tensors/modules (e.g. an AttentionBlockNode's
+                        # EncoderLayer) with other_parent, which is still a live, independently
+                        # trained genome -- backpropagating through both leads to "trying to
+                        # backward through the graph a second time" once either is trained again.
+                        node_copy = copy.deepcopy(other_node)
                         node_copy.disabled = False
                         node_copy.input_edges = []
                         node_copy.output_edges = []
@@ -131,8 +131,7 @@ class Crossover(ReproductionMethod):
         # the nodes added and can do lookup to reattach things)
 
         for node in child_genome.nodes:
-            if (isinstance(node, InputNode) or isinstance(node, OutputNode)
-                    or isinstance(node, BidirectionalAEInputNode) or isinstance(node, BidirectionalAEEncodingNode)):
+            if node.is_boundary_node:
                 # inputs and outputs don't need to be connected
                 continue
 
@@ -151,7 +150,9 @@ class Crossover(ReproductionMethod):
                                 other_edge.innovation_number
                                 not in child_genome.edge_map.keys()
                             ):
-                                edge_copy = copy.copy(other_edge)
+                                # deepcopy for the same reason as the node case above: avoid
+                                # sharing weight tensors with the still-live other_parent genome.
+                                edge_copy = copy.deepcopy(other_edge)
                                 edge_copy.disabled = False
                                 edge_copy.input_node = None
                                 edge_copy.output_node = None
@@ -161,8 +162,7 @@ class Crossover(ReproductionMethod):
         child_genome.connect_edges_during_crossover()
 
         for node in child_genome.nodes:
-            if (isinstance(node, InputNode) or isinstance(node, OutputNode)
-                    or isinstance(node, BidirectionalAEInputNode) or isinstance(node, BidirectionalAEEncodingNode)):
+            if node.is_boundary_node:
                 # inputs and outputs don't need to be connected
                 continue
 
@@ -180,8 +180,7 @@ class Crossover(ReproductionMethod):
         # input and one output edge, which we can connect up the same way as
         # done in the AddNode mutation.
         for node in child_genome.nodes:
-            if (isinstance(node, InputNode) or isinstance(node, OutputNode)
-                    or isinstance(node, BidirectionalAEInputNode) or isinstance(node, BidirectionalAEEncodingNode)):
+            if node.is_boundary_node:
                 # inputs and outputs don't need to be connected
                 continue
 
@@ -222,8 +221,7 @@ class Crossover(ReproductionMethod):
                 print(f"ADDING OUTPUT EDGES, len now: {len(node.output_edges)}!")
 
         for node in child_genome.nodes:
-            if (isinstance(node, InputNode) or isinstance(node, OutputNode)
-                    or isinstance(node, BidirectionalAEInputNode) or isinstance(node, BidirectionalAEEncodingNode)):
+            if node.is_boundary_node:
                 # inputs and outputs don't need to be connected
                 continue
 

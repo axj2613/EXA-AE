@@ -160,3 +160,19 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# --- exa-star project-specific ---
+# Large fMRI corpus: mounted on Kaggle via a Kaggle Dataset, never committed to git.
+datasets/hcp/complete/
+*.npz
+# Keep only the small atlas COORDINATES file the code needs; drop the large NIfTI atlases.
+datasets/hcp/atlases/*.nii
+datasets/hcp/atlases/*.nii.gz
+datasets/hcp/atlases/*.dlabel.nii
+# Run artifacts / outputs.
+output.csv
+genome_1.csv
+test_genomes/*.pkl
+test_genomes/*.gv
+test_genomes/*.png
+test_genomes/*.npy
