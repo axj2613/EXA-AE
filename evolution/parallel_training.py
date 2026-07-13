@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import gc
 
 import torch
@@ -11,26 +12,35 @@ def _train_one(genome, dataset, device, learning_rate, train_kwargs):
     worker thread. Distinct genomes share no mutable state (each owns its own modules/tensors on
     its own device); the only shared object is the dataset, whose sampling is lock-guarded.
 
+    The whole body runs inside `torch.cuda.device(device)`: a worker thread does NOT inherit the
+    genome's device as its current CUDA device, so without this the allocator, GradScaler internals,
+    and any implicit-device kernels would target the process-default device (cuda:0) while the
+    tensors live on cuda:1 -- a cross-device launch that raises cudaErrorIllegalAddress and poisons
+    the whole CUDA context.
+
     OOM-resilient: because evolved genomes grow without bound, a large enough one (mainly its
     decoder attention over the full token sequence) can exceed GPU memory. Rather than crashing the
     whole run, an OOM'd genome is assigned infinite fitness -- so selection drops it, which softly
     caps genome size -- its memory is released, and the search continues on the next generation.
     """
+    device = torch.device(device)
+    device_context = torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext()
     optimizer = None
-    try:
-        genome.to(device)
-        optimizer = torch.optim.Adam(genome.parameters(), lr=learning_rate)
-        genome.train(dataset=dataset, optimizer=optimizer, **train_kwargs)
-    except torch.cuda.OutOfMemoryError:
-        genome.fitness = float("inf")
-        genome.complexity = genome.parameter_report()
-        genome.reset()
-        genome.to("cpu")
-        optimizer = None
-        gc.collect()
-        torch.cuda.empty_cache()
-        print(f"OOM: genome {genome.generation_number} "
-              f"({genome.complexity['total_active_parameters']:,} params) penalized and skipped")
+    with device_context:
+        try:
+            genome.to(device)
+            optimizer = torch.optim.Adam(genome.parameters(), lr=learning_rate)
+            genome.train(dataset=dataset, optimizer=optimizer, **train_kwargs)
+        except torch.cuda.OutOfMemoryError:
+            genome.fitness = float("inf")
+            genome.complexity = genome.parameter_report()
+            genome.reset()
+            genome.to("cpu")
+            optimizer = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(f"OOM: genome {genome.generation_number} "
+                  f"({genome.complexity['total_active_parameters']:,} params) penalized and skipped")
     return genome
 
 
@@ -79,10 +89,13 @@ def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=Non
 
     # release freed-but-cached GPU memory and defragment between generations -- across hundreds of
     # generations of varying-sized genomes the caching allocator fragments, which alone can cause
-    # OOM even when enough total memory is free.
+    # OOM even when enough total memory is free. empty_cache() only affects the current device, so
+    # loop over all of them.
     if torch.cuda.is_available():
         gc.collect()
-        torch.cuda.empty_cache()
+        for index in range(torch.cuda.device_count()):
+            with torch.cuda.device(index):
+                torch.cuda.empty_cache()
 
     return trained
 
