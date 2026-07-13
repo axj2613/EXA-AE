@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import gc
 
 import torch
 
@@ -8,10 +9,28 @@ import torch
 def _train_one(genome, dataset, device, learning_rate, train_kwargs):
     """Moves a genome to its assigned device, builds a fresh optimizer, and trains it. Runs in a
     worker thread. Distinct genomes share no mutable state (each owns its own modules/tensors on
-    its own device); the only shared object is the dataset, whose sampling is lock-guarded."""
-    genome.to(device)
-    optimizer = torch.optim.Adam(genome.parameters(), lr=learning_rate)
-    genome.train(dataset=dataset, optimizer=optimizer, **train_kwargs)
+    its own device); the only shared object is the dataset, whose sampling is lock-guarded.
+
+    OOM-resilient: because evolved genomes grow without bound, a large enough one (mainly its
+    decoder attention over the full token sequence) can exceed GPU memory. Rather than crashing the
+    whole run, an OOM'd genome is assigned infinite fitness -- so selection drops it, which softly
+    caps genome size -- its memory is released, and the search continues on the next generation.
+    """
+    optimizer = None
+    try:
+        genome.to(device)
+        optimizer = torch.optim.Adam(genome.parameters(), lr=learning_rate)
+        genome.train(dataset=dataset, optimizer=optimizer, **train_kwargs)
+    except torch.cuda.OutOfMemoryError:
+        genome.fitness = float("inf")
+        genome.complexity = genome.parameter_report()
+        genome.reset()
+        genome.to("cpu")
+        optimizer = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"OOM: genome {genome.generation_number} "
+              f"({genome.complexity['total_active_parameters']:,} params) penalized and skipped")
     return genome
 
 
@@ -57,6 +76,13 @@ def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=Non
     # insert sequentially (population is sorted/truncated by fitness on each insert)
     for genome in trained:
         population.insert_genome(genome)
+
+    # release freed-but-cached GPU memory and defragment between generations -- across hundreds of
+    # generations of varying-sized genomes the caching allocator fragments, which alone can cause
+    # OOM even when enough total memory is free.
+    if torch.cuda.is_available():
+        gc.collect()
+        torch.cuda.empty_cache()
 
     return trained
 
