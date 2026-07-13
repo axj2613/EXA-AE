@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import threading
 import zipfile
 from collections import OrderedDict
 
@@ -118,8 +119,10 @@ class HCPWindowDataset:
         # {split: [(subject_id, recording_name, path, type)]}, filtered to recordings >= window_length
         self.split_recordings = self._index_recordings()
 
-        # LRU cache must exist before _load_or_compute_stats, which loads recordings via _load
+        # LRU cache must exist before _load_or_compute_stats, which loads recordings via _load.
+        # RLock (reentrant) so sample_batch can hold it and call _load, which re-acquires it.
         self._cache: OrderedDict[tuple[str, str], torch.Tensor] = OrderedDict()
+        self._lock = threading.RLock()
 
         self.parcel_mean, self.parcel_std = self._load_or_compute_stats(stats_path, normalization_sample)
 
@@ -234,21 +237,24 @@ class HCPWindowDataset:
 
     def _load(self, subject_id: str, recording_name: str, path: str) -> torch.Tensor:
         """Lazily loads one recording as a (num_parcels, num_timepoints) float tensor, with LRU
-        caching so hot recordings aren't re-read from disk each batch."""
+        caching so hot recordings aren't re-read from disk each batch. Cache access is guarded by
+        self._lock so the two-GPU parallel trainer (which samples from this one dataset in multiple
+        threads) can't corrupt the OrderedDict."""
         key = (subject_id, recording_name)
-        cached = self._cache.get(key)
-        if cached is not None:
-            self._cache.move_to_end(key)
-            return cached
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
 
-        npz = np.load(path)
-        data = npz["data"]  # (num_timepoints, num_parcels)
-        tensor = torch.tensor(data, dtype=self.dtype).transpose(0, 1).contiguous()  # (parcels, time)
+            npz = np.load(path)
+            data = npz["data"]  # (num_timepoints, num_parcels)
+            tensor = torch.tensor(data, dtype=self.dtype).transpose(0, 1).contiguous()  # (parcels, time)
 
-        self._cache[key] = tensor
-        if len(self._cache) > self.cache_size:
-            self._cache.popitem(last=False)
-        return tensor
+            self._cache[key] = tensor
+            if len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+            return tensor
 
     # ------------------------------------------------------------------ normalization
 
@@ -314,19 +320,23 @@ class HCPWindowDataset:
         if not recordings:
             raise ValueError(f"split '{split}' has no recordings")
 
-        windows = []
-        while len(windows) < batch_size:
-            subject_id, recording_name, path, _type = random.choice(recordings)
-            data = self._load(subject_id, recording_name, path)  # (parcels, time)
-            series_length = data.shape[1]
-            if series_length < window_length:
-                # should not happen if window_length <= shortest recording; skip defensively
-                continue
-            start = random.randint(0, series_length - window_length)
-            windows.append(data[:, start:start + window_length])
+        # hold the lock across sampling so concurrent parallel-trainer threads don't interleave on
+        # the shared `random` stream or the LRU cache; the GPU forward/backward happens outside
+        # sample_batch, so the two genomes still overlap on the device.
+        with self._lock:
+            windows = []
+            while len(windows) < batch_size:
+                subject_id, recording_name, path, _type = random.choice(recordings)
+                data = self._load(subject_id, recording_name, path)  # (parcels, time)
+                series_length = data.shape[1]
+                if series_length < window_length:
+                    # should not happen if window_length <= shortest recording; skip defensively
+                    continue
+                start = random.randint(0, series_length - window_length)
+                windows.append(data[:, start:start + window_length])
 
-        batch = torch.stack(windows, dim=0)
-        return self.normalize(batch)
+            batch = torch.stack(windows, dim=0)
+            return self.normalize(batch)
 
     def subject_windows(
         self, subject_id: str, window_length: int, types: tuple[str, ...] = ("rest",), stride: int | None = None
