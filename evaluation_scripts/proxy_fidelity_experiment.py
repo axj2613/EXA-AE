@@ -23,6 +23,7 @@ Usage:
 import argparse
 import copy
 import csv
+import os
 import random
 import sys
 import time
@@ -33,7 +34,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-sys.path.insert(0, ".")
+# make the repo importable regardless of the current working directory -- on Kaggle the notebook
+# runs from /kaggle/working while the repo lives in /kaggle/working/exa-star, so a bare "." would
+# not find the repo modules. This script sits at <repo>/evaluation_scripts/, so the repo root is
+# one level up.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from evolution.vision_transformer_block_edge_generator import VisionTransformerBlockEdgeGenerator  # noqa: E402
 from evolution.vision_transformer_block_node_generator import VisionTransformerBlockNodeGenerator  # noqa: E402

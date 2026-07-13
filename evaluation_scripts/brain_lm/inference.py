@@ -13,6 +13,7 @@ reasonable approximation; once training moves to many subjects, normalization st
 be persisted alongside the genome and reused here instead of being recomputed per test file.
 """
 
+import os
 import pickle
 import sys
 
@@ -22,7 +23,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-sys.path.insert(0, ".")  # allow running this script directly from evaluation_scripts/brain_lm/
+# make the repo importable regardless of CWD (Kaggle runs from /kaggle/working, repo is in
+# /kaggle/working/exa-star); this script is at <repo>/evaluation_scripts/brain_lm/.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from genomes.transformer_model.vision_transformer_mae import unpatchify  # noqa: E402
 from time_series.fmri_patch_dataset import FMRIPatchDataset  # noqa: E402

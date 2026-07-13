@@ -17,13 +17,16 @@ Usage:
 """
 
 import argparse
+import os
 import pickle
 import sys
 
 import numpy as np
 import torch
 
-sys.path.insert(0, ".")
+# make the repo importable regardless of CWD (Kaggle runs from /kaggle/working, repo is in
+# /kaggle/working/exa-star); this script is at <repo>/evaluation_scripts/brain_lm/.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from time_series.hcp_window_dataset import HCPWindowDataset  # noqa: E402
 
