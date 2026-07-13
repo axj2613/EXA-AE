@@ -50,26 +50,49 @@ def set_dropout(genome, probability):
                 submodule.p = probability
 
 
-def validation_loss(genome, dataset, device, batch_size, val_batches, amp_enabled):
-    """Mean masked-reconstruction loss over validation-split batches, eval mode, no grad."""
+def _accumulate_masked_r2(stats, pred, target, mask):
+    """Accumulates sufficient statistics for a masked-patch R^2 over many batches (a per-batch R^2
+    would be a biased, high-variance estimate)."""
+    masked = mask.bool().unsqueeze(-1).expand_as(pred)
+    predicted = pred[masked].float()
+    actual = target[masked].float()
+    stats["ss_res"] += ((predicted - actual) ** 2).sum().item()
+    stats["sum_t"] += actual.sum().item()
+    stats["sum_t2"] += (actual * actual).sum().item()
+    stats["n"] += actual.numel()
+
+
+def _finalize_r2(stats):
+    if stats["n"] == 0:
+        return float("nan")
+    ss_tot = stats["sum_t2"] - (stats["sum_t"] ** 2) / stats["n"]
+    return 1.0 - stats["ss_res"] / ss_tot if ss_tot > 0 else float("nan")
+
+
+def evaluate(genome, dataset, device, split, batch_size, num_batches, amp_enabled):
+    """Returns (mean masked-reconstruction MSE, masked-patch R^2) over `num_batches` batches of the
+    given split, eval mode, no grad. R^2 over masked patches is BrainLM's reported reconstruction
+    metric (their held-out ~0.46 UKB / ~0.28 HCP)."""
     for module in genome._iter_modules():
         module.eval()
-    total = 0.0
+    total_loss = 0.0
+    stats = {"ss_res": 0.0, "sum_t": 0.0, "sum_t2": 0.0, "n": 0}
     try:
         with torch.no_grad():
-            for _ in range(val_batches):
+            for _ in range(num_batches):
                 genome.reset()
-                batch = dataset.sample_batch(batch_size, genome.window_length, split="val").to(device)
+                batch = dataset.sample_batch(batch_size, genome.window_length, split=split).to(device)
                 if amp_enabled:
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        loss, _, _, _ = genome.forward(batch)
+                        loss, pred, mask, patches = genome.forward(batch)
                 else:
-                    loss, _, _, _ = genome.forward(batch)
-                total += loss.item()
+                    loss, pred, mask, patches = genome.forward(batch)
+                total_loss += loss.item()
+                _accumulate_masked_r2(stats, pred, patches, mask)
     finally:
         for module in genome._iter_modules():
             module.train()
-    return total / max(1, val_batches)
+    return total_loss / max(1, num_batches), _finalize_r2(stats)
 
 
 def rerank(candidates, dataset, device, args):
@@ -139,14 +162,15 @@ def full_train(genome, dataset, device, args):
         scheduler.step()
 
         if step % args.val_every == 0 or step == args.total_steps:
-            val = validation_loss(genome, dataset, device, args.batch_size, args.val_batches, amp_enabled)
+            val_mse, val_r2 = evaluate(genome, dataset, device, "val", args.batch_size, args.val_batches, amp_enabled)
             lr_now = scheduler.get_last_lr()[0]
-            print(f"step {step:6d}  lr {lr_now:.2e}  train {loss.item():.5f}  val {val:.5f}"
-                  f"{'  <- best' if val < best_val - 1e-6 else ''}")
-            if val < best_val - 1e-6:
-                best_val = val
+            print(f"step {step:6d}  lr {lr_now:.2e}  train {loss.item():.5f}  "
+                  f"val MSE {val_mse:.5f}  val R2 {val_r2:.4f}"
+                  f"{'  <- best' if val_mse < best_val - 1e-6 else ''}")
+            if val_mse < best_val - 1e-6:
+                best_val = val_mse
                 checks_without_improvement = 0
-                _save_best(genome, val, args.output)
+                _save_best(genome, val_mse, args.output)
             else:
                 checks_without_improvement += 1
                 if checks_without_improvement >= args.patience:
@@ -190,6 +214,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--val_every", type=int, default=500)
     parser.add_argument("--val_batches", type=int, default=32)
+    parser.add_argument("--test_batches", type=int, default=64, help="batches for the final held-out test R^2")
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--min_lr", type=float, default=1e-5)
@@ -229,6 +254,18 @@ def main():
         print(f"dropout overridden to {args.dropout} for the final run")
 
     full_train(winner, dataset, device, args)
+
+    # honest held-out number: reconstruction R^2 on the TEST split (untouched during training/
+    # selection), computed once on the best-validation model, for comparison against BrainLM.
+    with open(args.output, "rb") as best_file:
+        best = pickle.load(best_file)
+    best.to(device)
+    test_mse, test_r2 = evaluate(
+        best, dataset, device, "test", args.batch_size, args.test_batches, device.type == "cuda"
+    )
+    print(f"\n=== HELD-OUT TEST (best-val model, {args.test_batches} batches) ===")
+    print(f"reconstruction R^2 = {test_r2:.4f}   (MSE {test_mse:.5f})")
+    print("BrainLM reference: masked-reconstruction R^2 ~0.46 (UKB) / ~0.28 (HCP)")
 
 
 if __name__ == "__main__":
