@@ -243,18 +243,27 @@ class VisionTransformerBlockGenome(Genome):
             fixed_parameters: the constant scaffolding.
             num_active_hidden_nodes / num_active_edges: EXAMM-style structure counts.
             node_type_counts: active hidden-node count per block type.
+            node_type_counts_by_region: the same per-type counts split into "encoder" (depth <= 0.5,
+                the visible-token half incl. the bottleneck) and "decoder" (depth > 0.5, the
+                reconstruction half) -- so you can see where evolution placed each block type
+                (masked reconstruction specifically needs token-mixing blocks in the decoder).
         """
         fixed = self._fixed_scaffolding_parameters()
 
         evolved_active = 0
         num_active_nodes = 0
         node_type_counts: dict[str, int] = {}
+        region_type_counts: dict[str, dict[str, int]] = {"encoder": {}, "decoder": {}}
         for node in self.nodes:
             if getattr(node, "active", False) and not node.is_boundary_node:
                 evolved_active += sum(weight.numel() for weight in node.weights)
                 num_active_nodes += 1
                 type_name = type(node).__name__
                 node_type_counts[type_name] = node_type_counts.get(type_name, 0) + 1
+                # split by graph region (matches _forward_graph: depth > 0.5 is the decoder half
+                # that reconstructs all patches; the depth-0.5 bottleneck counts as encoder).
+                region = "decoder" if node.depth > 0.5 else "encoder"
+                region_type_counts[region][type_name] = region_type_counts[region].get(type_name, 0) + 1
 
         num_active_edges = 0
         for edge in self.edges:
@@ -269,6 +278,7 @@ class VisionTransformerBlockGenome(Genome):
             "num_active_hidden_nodes": num_active_nodes,
             "num_active_edges": num_active_edges,
             "node_type_counts": node_type_counts,
+            "node_type_counts_by_region": region_type_counts,
         }
 
     def to(self, device) -> "VisionTransformerBlockGenome":
@@ -545,13 +555,15 @@ class VisionTransformerBlockGenome(Genome):
         for parameter in self.parameters():
             parameter.grad = None
 
+        by_region = self.complexity['node_type_counts_by_region']
         print(
             f"final fitness (validation MSE): {self.fitness:.6f} | "
             f"active params: {self.complexity['total_active_parameters']:,} "
             f"({self.complexity['evolved_active_parameters']:,} evolved) | "
             f"active hidden nodes: {self.complexity['num_active_hidden_nodes']}, "
             f"edges: {self.complexity['num_active_edges']} | "
-            f"types: {self.complexity['node_type_counts']}"
+            f"types: {self.complexity['node_type_counts']} "
+            f"(encoder: {by_region['encoder']}, decoder: {by_region['decoder']})"
         )
 
     def _validation_loss(self, dataset, batch_size, fitness_batches, amp_enabled) -> float:
