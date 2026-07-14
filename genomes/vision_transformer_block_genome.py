@@ -8,7 +8,6 @@ import torch.nn as nn
 from genomes.genome import Genome
 from genomes.nodes.block_input_node import BlockInputNode
 from genomes.nodes.block_output_node import BlockOutputNode
-from genomes.nodes.simple_block_node import SimpleBlockNode
 from genomes.nodes.attention_block_node import AttentionBlockNode
 from genomes.edges.block_edge import BlockEdge
 from genomes.transformer_model.positonal_encoding import PositionalEncoding
@@ -79,8 +78,17 @@ class VisionTransformerBlockGenome(Genome):
         mask_ratio: float = 0.75,
         use_cls_token: bool = True,
         weight_generator: WeightGenerator = LamarckianBlockWeightGenerator(),
+        encoder_depth: int = 3,
+        decoder_depth: int = 2,
     ):
         super().__init__(generation_number)
+
+        if encoder_depth < 1 or decoder_depth < 1:
+            raise ValueError(
+                f"encoder_depth ({encoder_depth}) and decoder_depth ({decoder_depth}) must be >= 1: "
+                f"masked reconstruction needs at least one encoder self-attention layer (the depth-0.5 "
+                f"bottleneck) and one decoder self-attention layer."
+            )
 
         if num_parcels % parcel_patch_size != 0:
             raise ValueError(
@@ -147,52 +155,61 @@ class VisionTransformerBlockGenome(Genome):
         self.decoder_pred_nonlinearity = nn.LeakyReLU(0.1)
         self.decoder_pred2 = nn.Linear(d_model // 2, self.patch_dim)
 
-        # --- evolvable graph seed topology: input (0.0) -> bottleneck (0.5) -> output (1.0) ---
+        # --- evolvable graph seed topology: a BrainLM-shaped self-attention stack ---
+        # input (0.0) -> [encoder_depth self-attention layers, the last at exactly 0.5 = the
+        # bottleneck] -> [decoder_depth self-attention layers] -> output (1.0), wired as a chain.
+        #
+        # A *minimal* seed (1 layer) cannot reconstruct real fMRI -- its capacity ceiling sits at
+        # the predict-the-mean baseline -- and evolution can't grow into depth from there, because a
+        # newly mutated-in layer is warm-started to near-identity and one genome's tiny training
+        # budget can't train it enough to beat the already-trained shallow incumbent, so the search
+        # stalls at ~MSE 1.0 (observed). Seeding a capable stack (still ~1M params, ~100x smaller
+        # than BrainLM) gives the search a working model to REFINE/PRUNE for efficiency instead.
+        #
+        # Every seed layer is a full multi-head self-attention + FFN block (AttentionBlockNode ->
+        # EncoderLayer), matching BrainLM's encoder/decoder layers, and is NOT warm-started so the
+        # stack is functional from step 0 (important: this seed is meant to be pre-trained before
+        # evolution). Exactly ONE node sits at depth 0.5 (the last encoder layer = the bottleneck),
+        # which forward() uses to locate the encoder->decoder transition and which the autoencoder-
+        # mode reproduction operators keep structurally protected (see the class docstring).
         self.encoder_input_node = BlockInputNode(
             innovation_number=InnovationGenerator.get_innovation_number(), depth=0.0, d_model=d_model
         )
         self.add_input_node(self.encoder_input_node)
 
-        self.bottleneck_node = SimpleBlockNode(
-            innovation_number=InnovationGenerator.get_innovation_number(), depth=0.5, d_model=d_model
-        )
-        self.add_node(self.bottleneck_node)
+        def _attention_layer(depth: float) -> AttentionBlockNode:
+            return AttentionBlockNode(
+                innovation_number=InnovationGenerator.get_innovation_number(), depth=depth,
+                d_model=d_model, num_heads=num_heads, d_ff=d_ff, dropout=dropout, warm_start=False,
+            )
 
-        # A decoder-side self-attention block is seeded at depth 0.75 (bottleneck -> decoder_attn
-        # -> output). Masked reconstruction is IMPOSSIBLE without at least one token-mixing block
-        # in the decoder region: a masked position enters the decoder as (mask_token + positional
-        # embedding) -- identical across samples -- and can only acquire sample-specific content by
-        # ATTENDING to the visible tokens (exactly BrainLM's fixed attention decoder, modeling_
-        # brainlm.py BrainLMDecoder.decoder_layers). Without it every genome collapses to predicting
-        # the per-position mean, so the whole search has no fitness signal to select on. It is seeded
-        # into the evolvable graph (not warm-started, so it is functional from step 0) and evolution
-        # refines/adds around it.
-        self.decoder_attention_node = AttentionBlockNode(
-            innovation_number=InnovationGenerator.get_innovation_number(), depth=0.75, d_model=d_model,
-            num_heads=num_heads, d_ff=d_ff, dropout=dropout, warm_start=False,
-        )
-        self.add_node(self.decoder_attention_node)
+        def _connect(source, target):
+            self.add_edge(BlockEdge(
+                innovation_number=InnovationGenerator.get_innovation_number(),
+                input_node=source, output_node=target,
+            ))
+
+        previous = self.encoder_input_node
+        for i in range(encoder_depth):
+            # depths 0.5*(i+1)/encoder_depth -> the last lands exactly on 0.5 (the bottleneck)
+            layer = _attention_layer(0.5 * (i + 1) / encoder_depth)
+            self.add_node(layer)
+            _connect(previous, layer)
+            previous = layer
+        self.bottleneck_node = previous  # the depth-0.5 encoder layer triggers the decoder transition
+
+        for i in range(decoder_depth):
+            # depths strictly in (0.5, 1.0)
+            layer = _attention_layer(0.5 + 0.5 * (i + 1) / (decoder_depth + 1))
+            self.add_node(layer)
+            _connect(previous, layer)
+            previous = layer
 
         self.decoder_output_node = BlockOutputNode(
             innovation_number=InnovationGenerator.get_innovation_number(), depth=1.0, d_model=d_model
         )
         self.add_output_node(self.decoder_output_node)
-
-        self.add_edge(BlockEdge(
-            innovation_number=InnovationGenerator.get_innovation_number(),
-            input_node=self.encoder_input_node,
-            output_node=self.bottleneck_node,
-        ))
-        self.add_edge(BlockEdge(
-            innovation_number=InnovationGenerator.get_innovation_number(),
-            input_node=self.bottleneck_node,
-            output_node=self.decoder_attention_node,
-        ))
-        self.add_edge(BlockEdge(
-            innovation_number=InnovationGenerator.get_innovation_number(),
-            input_node=self.decoder_attention_node,
-            output_node=self.decoder_output_node,
-        ))
+        _connect(previous, self.decoder_output_node)
 
         weight_generator(self)
 
