@@ -106,7 +106,12 @@ def evaluate(genome, dataset, device, split, batch_size, num_batches, amp_enable
     finally:
         for module in genome._iter_modules():
             module.train()
-    return total_loss / max(1, valid_batches), _finalize_r2(stats)
+    if valid_batches == 0:
+        # every batch was non-finite (e.g. the model has diverged to NaN weights) -- report failure
+        # rather than a spurious MSE 0.0, which would otherwise register as a new "best" and save the
+        # broken model.
+        return float("inf"), float("nan")
+    return total_loss / valid_batches, _finalize_r2(stats)
 
 
 def rerank(candidates, dataset, device, args):
@@ -167,11 +172,17 @@ def full_train(genome, dataset, device, args):
             with torch.autocast(device_type="cuda", dtype=torch.float16):
                 loss, _, _, _ = genome.forward(batch)
             scaler.scale(loss).backward()
+            # unscale before clipping so max_norm is measured in true (not fp16-scaled) gradient
+            # units. Without clipping, fp16 training of the deeper seed diverges to NaN as warmup
+            # ramps the LR to its peak (mirrors the clip already in genome.train's search loop).
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(genome.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss, _, _, _ = genome.forward(batch)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(genome.parameters(), max_norm=1.0)
             optimizer.step()
         scheduler.step()
 
@@ -180,8 +191,10 @@ def full_train(genome, dataset, device, args):
             lr_now = scheduler.get_last_lr()[0]
             print(f"step {step:6d}  lr {lr_now:.2e}  train {loss.item():.5f}  "
                   f"val MSE {val_mse:.5f}  val R2 {val_r2:.4f}"
-                  f"{'  <- best' if val_mse < best_val - 1e-6 else ''}")
-            if val_mse < best_val - 1e-6:
+                  f"{'  <- best' if math.isfinite(val_mse) and val_mse < best_val - 1e-6 else ''}")
+            # require a FINITE val: a diverged model reports inf (see evaluate), which must never
+            # count as an improvement or get saved as the best model.
+            if math.isfinite(val_mse) and val_mse < best_val - 1e-6:
                 best_val = val_mse
                 checks_without_improvement = 0
                 _save_best(genome, val_mse, args.output)
