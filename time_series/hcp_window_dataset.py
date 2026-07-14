@@ -180,27 +180,54 @@ class HCPWindowDataset:
     def _build_length_index(self) -> dict[str, int]:
         """Maps '{subject}/{recording}' -> num_timepoints for every recording, reading only .npy
         headers (fast). Cached to length_index_path (keyed by relative subject/recording, so the
-        cache survives a changed absolute mount path across Kaggle sessions)."""
-        if self._length_index_path is not None and os.path.exists(self._length_index_path):
-            with open(self._length_index_path) as index_file:
-                lengths = json.load(index_file)
-            logger.info(f"loaded recording length index from '{self._length_index_path}'")
-            return lengths
+        cache survives a changed absolute mount path across Kaggle sessions).
 
-        pairs = [
+        Self-healing: subject_recordings is always re-scanned from disk, but the cache may have
+        been built over a DIFFERENT/smaller recording set (an earlier partial run, or a dataset
+        remount that added recordings). Any recording absent from the loaded cache is scanned and
+        the cache updated, rather than trusting it wholesale -- otherwise _index_recordings would
+        KeyError on a recording the cache never saw (as it did: '102109/rfMRI_REST2_LR'). A cache
+        that is present but unreadable (e.g. truncated by a Kaggle session teardown) is rebuilt
+        from scratch instead of crashing.
+        """
+        lengths: dict[str, int] = {}
+        if self._length_index_path is not None and os.path.exists(self._length_index_path):
+            try:
+                with open(self._length_index_path) as index_file:
+                    lengths = json.load(index_file)
+                logger.info(f"loaded recording length index from '{self._length_index_path}'")
+            except (json.JSONDecodeError, OSError) as error:
+                logger.warning(
+                    f"length index '{self._length_index_path}' is unreadable ({error!r}); "
+                    f"rebuilding from scratch"
+                )
+                lengths = {}
+
+        missing = [
             (subject_id, recording_name, path)
             for subject_id, recordings in self.subject_recordings.items()
             for recording_name, path in recordings.items()
+            if f"{subject_id}/{recording_name}" not in lengths
         ]
-        logger.info(f"scanning lengths of {len(pairs)} recordings (header-only)...")
-        lengths = {
-            f"{subject_id}/{recording_name}": read_npz_data_length(path)
-            for subject_id, recording_name, path in pairs
-        }
+        if missing:
+            if lengths:
+                logger.warning(
+                    f"length index is missing {len(missing)} recordings (stale/partial cache); "
+                    f"scanning just those (header-only)..."
+                )
+            else:
+                logger.info(f"scanning lengths of {len(missing)} recordings (header-only)...")
+            for subject_id, recording_name, path in missing:
+                lengths[f"{subject_id}/{recording_name}"] = read_npz_data_length(path)
 
-        if self._length_index_path is not None:
-            with open(self._length_index_path, "w") as index_file:
+        # (re)write the cache only when we actually scanned something new (fast path: an
+        # already-complete cache is a pure read). Atomic tmp+replace so an interrupted write can't
+        # leave a truncated index behind.
+        if self._length_index_path is not None and missing:
+            tmp = self._length_index_path + ".tmp"
+            with open(tmp, "w") as index_file:
                 json.dump(lengths, index_file)
+            os.replace(tmp, self._length_index_path)
             logger.info(f"saved recording length index to '{self._length_index_path}'")
         return lengths
 
