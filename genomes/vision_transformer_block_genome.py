@@ -213,6 +213,12 @@ class VisionTransformerBlockGenome(Genome):
 
         weight_generator(self)
 
+        # mark node/edge forward-backward reachability (node.active) so a freshly-built genome is
+        # immediately forward-able. The reproduction operators recompute this on every mutated
+        # child, but a seed built directly (e.g. pre-training it before evolution) is forward()'d
+        # without going through them -- and _forward_graph reads node.active directly.
+        self.calculate_reachability()
+
     def parameters(self) -> list[torch.Tensor]:
         """Extends Genome.parameters() (which only walks node/edge .weights) with the fixed
         scaffolding modules' parameters, which live outside the evolvable node/edge graph."""
