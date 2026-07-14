@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -449,6 +451,7 @@ class VisionTransformerBlockGenome(Genome):
         for module in self._iter_modules():
             module.train()
 
+        diverged = False
         for iteration in range(iterations):
             last_loss = None
             for _ in range(batches_per_iteration):
@@ -466,15 +469,42 @@ class VisionTransformerBlockGenome(Genome):
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
                         loss, _, _, _ = self.forward(batch)
                     scaler.scale(loss).backward()
+                    # unscale before clipping so max_norm is measured in true (not fp16-scaled)
+                    # gradient units, matching the non-amp branch below.
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss, _, _, _ = self.forward(batch)
                     loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                     optimizer.step()
                 last_loss = loss.detach().item()
 
+                # evolved graphs have unbounded depth (mutation can stack many blocks), so under
+                # fp16 autocast a bad topology/init can still blow up despite clipping. Treat
+                # divergence like the OOM case in parallel_training.py: penalize and bail rather
+                # than keep training (and eventually validating) on NaN weights, which would give
+                # this genome a NaN fitness -- and NaN comparisons are always False, so Genome.__lt__
+                # can't reliably sort it out of the population, letting corrupt weights survive into
+                # crossover.
+                if not math.isfinite(last_loss):
+                    diverged = True
+                    break
+            if diverged:
+                break
             print(f"iteration {iteration} train loss: {last_loss:.6f}")
+
+        if diverged:
+            print(f"DIVERGED: genome {self.generation_number} produced a non-finite loss "
+                  f"({last_loss}) -- penalized with infinite fitness")
+            self.fitness = float("inf")
+            self.complexity = self.parameter_report()
+            self.reset()
+            for parameter in self.parameters():
+                parameter.grad = None
+            return
 
         self.fitness = self._validation_loss(dataset, batch_size, fitness_batches, amp_enabled)
 
@@ -515,7 +545,19 @@ class VisionTransformerBlockGenome(Genome):
                             loss, _, _, _ = self.forward(batch)
                     else:
                         loss, _, _, _ = self.forward(batch)
-                    total += loss.item()
+                    loss_value = loss.item()
+                    # a genome can finish TRAINING with a finite last-batch loss (so train()'s own
+                    # divergence guard never fires) and still overflow fp16 on a particular
+                    # VALIDATION window it never saw during training -- e.g. large-but-finite
+                    # weights push an attention logit past fp16's ~65504 range on an outlier input.
+                    # One non-finite batch would otherwise silently poison the whole averaged
+                    # fitness (a single NaN/inf in the running sum makes the mean NaN/inf too), so
+                    # bail immediately rather than average over it.
+                    if not math.isfinite(loss_value):
+                        print(f"DIVERGED: genome {self.generation_number} produced a non-finite "
+                              f"validation loss ({loss_value}) -- penalized with infinite fitness")
+                        return float("inf")
+                    total += loss_value
         finally:
             for module in self._iter_modules():
                 module.train()

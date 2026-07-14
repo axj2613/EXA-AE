@@ -43,7 +43,19 @@ class Genome(ABC):
             the other genome.
         """
 
-        if self.fitness is None and other.fitness is None:
+        # NaN fitness (e.g. a genome whose training diverged) must be treated as worst-possible,
+        # not "unorderable" -- `nan < x` and `x < nan` are both False under IEEE-754, so without
+        # this a NaN-fitness genome sorts inconsistently instead of sinking to the bottom, and can
+        # survive into the population to be selected as a crossover parent.
+        self_is_nan = self.fitness is not None and self.fitness != self.fitness
+        other_is_nan = other.fitness is not None and other.fitness != other.fitness
+        if self_is_nan and other_is_nan:
+            return True
+        elif self_is_nan:
+            return False
+        elif other_is_nan:
+            return True
+        elif self.fitness is None and other.fitness is None:
             # if neither genome has a fitness order does not matter.
             return True
         elif self.fitness is None:

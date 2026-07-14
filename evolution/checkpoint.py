@@ -43,7 +43,15 @@ def save_checkpoint(path: str, population_strategy, generation: int, config: dic
     tmp_path = path + ".tmp"
     with open(tmp_path, "wb") as checkpoint_file:
         pickle.dump(state, checkpoint_file)
-    os.replace(tmp_path, path)  # atomic: a crash mid-write can't corrupt the last good checkpoint
+
+    # keep the PREVIOUS good checkpoint as a .bak before overwriting. The tmp+os.replace below is
+    # already atomic against a crash mid-write, but that protects only a single file -- if that one
+    # file is later corrupted out-of-band (Kaggle truncating /kaggle/working on session teardown, a
+    # bad download/re-upload round-trip), the whole run is lost. Rotating one generation back means
+    # a corrupt latest checkpoint costs at most CHECKPOINT_EVERY generations, not everything.
+    if os.path.exists(path):
+        os.replace(path, path + ".bak")  # atomic rename of the last good checkpoint
+    os.replace(tmp_path, path)           # atomic: a crash mid-write can't corrupt the last good one
 
     for genome, device in zip(genomes, original_devices):
         genome.to(device)
@@ -52,9 +60,21 @@ def save_checkpoint(path: str, population_strategy, generation: int, config: dic
 def load_checkpoint(path: str) -> dict:
     """Loads a checkpoint saved by save_checkpoint and restores the global InnovationGenerator
     counter and the RNG states. Returns the state dict (population_strategy, generation, config);
-    the caller should genome.to(device) the population and resume the loop from `generation`."""
-    with open(path, "rb") as checkpoint_file:
-        state = pickle.load(checkpoint_file)
+    the caller should genome.to(device) the population and resume the loop from `generation`.
+
+    If the primary checkpoint is unreadable/corrupt, transparently falls back to the rolling .bak
+    (the previous generation's checkpoint) rather than losing the whole run."""
+    try:
+        with open(path, "rb") as checkpoint_file:
+            state = pickle.load(checkpoint_file)
+    except (pickle.UnpicklingError, EOFError, OSError, ValueError) as error:
+        backup = path + ".bak"
+        if not os.path.exists(backup):
+            raise
+        print(f"WARNING: checkpoint {path} is unreadable ({error!r}); "
+              f"falling back to backup {backup}")
+        with open(backup, "rb") as checkpoint_file:
+            state = pickle.load(checkpoint_file)
 
     InnovationGenerator.innovation_counter = state["innovation_counter"]
     random.setstate(state["py_rng"])

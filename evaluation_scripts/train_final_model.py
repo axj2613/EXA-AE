@@ -72,10 +72,19 @@ def _finalize_r2(stats):
 def evaluate(genome, dataset, device, split, batch_size, num_batches, amp_enabled):
     """Returns (mean masked-reconstruction MSE, masked-patch R^2) over `num_batches` batches of the
     given split, eval mode, no grad. R^2 over masked patches is BrainLM's reported reconstruction
-    metric (their held-out ~0.46 UKB / ~0.28 HCP)."""
+    metric (their held-out ~0.46 UKB / ~0.28 HCP).
+
+    A rare fp16 overflow on one outlier window (large-but-finite trained weights pushing an
+    attention logit past fp16's ~65504 range) shouldn't nuke an entire report after a long run --
+    such a batch is skipped and excluded from the average/R^2, with a warning printed. This is a
+    different policy than the genome-selection fitness guard in vision_transformer_block_genome.py,
+    which treats ANY non-finite validation batch as full genome failure: that guard is choosing
+    among many candidate architectures, so it should be pessimistic; this call is reporting the
+    honest quality of the one already-chosen winner, so it should stay robust to a single glitch."""
     for module in genome._iter_modules():
         module.eval()
     total_loss = 0.0
+    valid_batches = 0
     stats = {"ss_res": 0.0, "sum_t": 0.0, "sum_t2": 0.0, "n": 0}
     try:
         with torch.no_grad():
@@ -87,12 +96,17 @@ def evaluate(genome, dataset, device, split, batch_size, num_batches, amp_enable
                         loss, pred, mask, patches = genome.forward(batch)
                 else:
                     loss, pred, mask, patches = genome.forward(batch)
-                total_loss += loss.item()
+                loss_value = loss.item()
+                if not math.isfinite(loss_value):
+                    print(f"WARNING: non-finite loss on a '{split}' evaluation batch -- skipped")
+                    continue
+                total_loss += loss_value
+                valid_batches += 1
                 _accumulate_masked_r2(stats, pred, patches, mask)
     finally:
         for module in genome._iter_modules():
             module.train()
-    return total_loss / max(1, num_batches), _finalize_r2(stats)
+    return total_loss / max(1, valid_batches), _finalize_r2(stats)
 
 
 def rerank(candidates, dataset, device, args):

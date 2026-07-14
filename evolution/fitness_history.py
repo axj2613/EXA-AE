@@ -69,7 +69,7 @@ class FitnessHistory:
         if all(m is not None for m in mean):
             axis.plot(generations, mean, "--", alpha=0.6, label="population mean")
         axis.set_xlabel("generation")
-        axis.set_ylabel("validation reconstruction MSE (lower is better)")
+        axis.set_ylabel("validation reconstruction MSE")
         axis.set_title("Evolution progress")
         axis.legend()
         axis.grid(True, alpha=0.3)

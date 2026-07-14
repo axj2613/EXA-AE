@@ -76,14 +76,24 @@ def train_copy(topology, dataset, device, learning_rate, budget):
     return genome.fitness, genome.complexity["total_active_parameters"], time.time() - start
 
 
-def spearman(a, b) -> float:
+def spearman(a, b) -> tuple[float, int]:
+    """Returns (rho, num_dropped). A topology whose proxy or full training diverged (NaN loss,
+    now penalized with infinite fitness by genome.train -- see vision_transformer_block_genome.py)
+    is dropped rather than allowed to null out the whole correlation: scipy's spearmanr (and a
+    plain corrcoef) both propagate a single NaN/inf into the overall result."""
+    a = np.asarray(a, dtype=float); b = np.asarray(b, dtype=float)
+    finite = np.isfinite(a) & np.isfinite(b)
+    dropped = int((~finite).sum())
+    a, b = a[finite], b[finite]
+    if len(a) < 2:
+        return float("nan"), dropped
     try:
         from scipy.stats import spearmanr
-        return float(spearmanr(a, b).correlation)
+        return float(spearmanr(a, b).correlation), dropped
     except Exception:
         # rank-correlation fallback (Pearson on ranks) if scipy is unavailable
         ar = np.argsort(np.argsort(a)); br = np.argsort(np.argsort(b))
-        return float(np.corrcoef(ar, br)[0, 1])
+        return float(np.corrcoef(ar, br)[0, 1]), dropped
 
 
 def main():
@@ -155,10 +165,13 @@ def main():
 
     proxy_fits = [r[2] for r in rows]
     full_fits = [r[3] for r in rows]
-    rho = spearman(proxy_fits, full_fits)
+    rho, dropped = spearman(proxy_fits, full_fits)
     speedup = sum(r[5] for r in rows) / max(1e-9, sum(r[4] for r in rows))
 
-    print(f"\nSpearman rank correlation (proxy vs full fitness): {rho:.3f}")
+    if dropped:
+        print(f"\n{dropped}/{len(rows)} topolog{'y' if dropped == 1 else 'ies'} diverged (non-finite "
+              f"fitness) and were excluded from the correlation below.")
+    print(f"\nSpearman rank correlation (proxy vs full fitness, {len(rows) - dropped} usable): {rho:.3f}")
     print(f"  >0.7 = the cheap fitness ranks architectures reliably; scale generations with confidence.")
     print(f"proxy speedup (full_time / proxy_time): {speedup:.1f}x")
 
