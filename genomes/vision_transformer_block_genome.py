@@ -9,6 +9,7 @@ from genomes.genome import Genome
 from genomes.nodes.block_input_node import BlockInputNode
 from genomes.nodes.block_output_node import BlockOutputNode
 from genomes.nodes.simple_block_node import SimpleBlockNode
+from genomes.nodes.attention_block_node import AttentionBlockNode
 from genomes.edges.block_edge import BlockEdge
 from genomes.transformer_model.positonal_encoding import PositionalEncoding
 from genomes.transformer_model.vision_transformer_mae import (
@@ -157,6 +158,21 @@ class VisionTransformerBlockGenome(Genome):
         )
         self.add_node(self.bottleneck_node)
 
+        # A decoder-side self-attention block is seeded at depth 0.75 (bottleneck -> decoder_attn
+        # -> output). Masked reconstruction is IMPOSSIBLE without at least one token-mixing block
+        # in the decoder region: a masked position enters the decoder as (mask_token + positional
+        # embedding) -- identical across samples -- and can only acquire sample-specific content by
+        # ATTENDING to the visible tokens (exactly BrainLM's fixed attention decoder, modeling_
+        # brainlm.py BrainLMDecoder.decoder_layers). Without it every genome collapses to predicting
+        # the per-position mean, so the whole search has no fitness signal to select on. It is seeded
+        # into the evolvable graph (not warm-started, so it is functional from step 0) and evolution
+        # refines/adds around it.
+        self.decoder_attention_node = AttentionBlockNode(
+            innovation_number=InnovationGenerator.get_innovation_number(), depth=0.75, d_model=d_model,
+            num_heads=num_heads, d_ff=d_ff, dropout=dropout, warm_start=False,
+        )
+        self.add_node(self.decoder_attention_node)
+
         self.decoder_output_node = BlockOutputNode(
             innovation_number=InnovationGenerator.get_innovation_number(), depth=1.0, d_model=d_model
         )
@@ -170,6 +186,11 @@ class VisionTransformerBlockGenome(Genome):
         self.add_edge(BlockEdge(
             innovation_number=InnovationGenerator.get_innovation_number(),
             input_node=self.bottleneck_node,
+            output_node=self.decoder_attention_node,
+        ))
+        self.add_edge(BlockEdge(
+            innovation_number=InnovationGenerator.get_innovation_number(),
+            input_node=self.decoder_attention_node,
             output_node=self.decoder_output_node,
         ))
 
@@ -350,7 +371,14 @@ class VisionTransformerBlockGenome(Genome):
                 node.value = x
                 continue
 
-            expected_shape = x.shape if node.depth < 0.5 else decoder_shape
+            # The bottleneck sits at depth EXACTLY 0.5 and still consumes ENCODER-space visible
+            # tokens (its OUTPUT is what _prepare_decoder_input transitions into decoder space).
+            # A bare `node.depth < 0.5` excludes it, so its expected_shape became decoder_shape,
+            # its (visible-shape) input edge was filtered out by the shape check below, and it
+            # received an all-zeros node_input -- starving the ENTIRE decoder of any sample-specific
+            # information and collapsing the model to predicting the per-position mean (R^2 ~ 0).
+            in_encoder_region = node.depth < 0.5 or node is self.bottleneck_node
+            expected_shape = x.shape if in_encoder_region else decoder_shape
 
             node_input = None
             for edge in node.input_edges:
