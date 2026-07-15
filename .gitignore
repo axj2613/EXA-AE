@@ -176,3 +176,8 @@ test_genomes/*.pkl
 test_genomes/*.gv
 test_genomes/*.png
 test_genomes/*.npy
+
+# evaluation chart outputs
+eval_out/
+norm_stats.npz
+length_index.json
