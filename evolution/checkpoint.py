@@ -10,7 +10,8 @@ import torch
 from innovation.innovation_generator import InnovationGenerator
 
 
-def save_checkpoint(path: str, population_strategy, generation: int, config: dict | None = None):
+def save_checkpoint(path: str, population_strategy, generation: int, config: dict | None = None,
+                    pdh_state: dict | None = None):
     """Pickles the full evolution state so a run can resume after a Kaggle session times out.
 
     Captures the population strategy (its genomes, seed, generated-genome counter, and
@@ -35,6 +36,10 @@ def save_checkpoint(path: str, population_strategy, generation: int, config: dic
         "innovation_counter": InnovationGenerator.innovation_counter,
         "generation": generation,
         "config": config,
+        # Progressive Dynamic Hurdles state (hurdle thresholds + since-last-hurdle counter). Must
+        # persist or a resume restarts the hurdle schedule from scratch, re-cheapening already-hard
+        # evaluations. None when PDH is not in use.
+        "pdh_state": pdh_state,
         "py_rng": random.getstate(),
         "np_rng": np.random.get_state(),
         "torch_rng": torch.get_rng_state(),

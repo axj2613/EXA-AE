@@ -7,7 +7,7 @@ import gc
 import torch
 
 
-def _train_one(genome, dataset, device, learning_rate, train_kwargs):
+def _train_one(genome, dataset, device, learning_rate, train_kwargs, pdh=None):
     """Moves a genome to its assigned device, builds a fresh optimizer, and trains it. Runs in a
     worker thread. Distinct genomes share no mutable state (each owns its own modules/tensors on
     its own device); the only shared object is the dataset, whose sampling is lock-guarded.
@@ -17,6 +17,11 @@ def _train_one(genome, dataset, device, learning_rate, train_kwargs):
     and any implicit-device kernels would target the process-default device (cuda:0) while the
     tensors live on cuda:1 -- a cross-device launch that raises cudaErrorIllegalAddress and poisons
     the whole CUDA context.
+
+    If `pdh` (a ProgressiveDynamicHurdles) is given, the genome is trained with hurdle-escalated
+    budgeting instead of the fixed train_kwargs budget: it reuses the same optimizer across stages
+    (so momentum + inherited weights accumulate) and reads batch_size/fitness_batches/use_amp from
+    train_kwargs (iterations/batches_per_iteration are ignored -- PDH supplies the step schedule).
 
     OOM-resilient: because evolved genomes grow without bound, a large enough one (mainly its
     decoder attention over the full token sequence) can exceed GPU memory. Rather than crashing the
@@ -30,7 +35,15 @@ def _train_one(genome, dataset, device, learning_rate, train_kwargs):
         try:
             genome.to(device)
             optimizer = torch.optim.Adam(genome.parameters(), lr=learning_rate)
-            genome.train(dataset=dataset, optimizer=optimizer, **train_kwargs)
+            if pdh is not None:
+                pdh.train(
+                    genome, dataset=dataset, optimizer=optimizer,
+                    batch_size=train_kwargs["batch_size"],
+                    fitness_batches=train_kwargs["fitness_batches"],
+                    use_amp=train_kwargs.get("use_amp", False),
+                )
+            else:
+                genome.train(dataset=dataset, optimizer=optimizer, **train_kwargs)
         except torch.cuda.OutOfMemoryError:
             genome.fitness = float("inf")
             genome.complexity = genome.parameter_report()
@@ -44,7 +57,7 @@ def _train_one(genome, dataset, device, learning_rate, train_kwargs):
     return genome
 
 
-def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=None, **train_kwargs):
+def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=None, pdh=None, **train_kwargs):
     """Generates a small batch of genomes and trains them concurrently, one per device -- turning
     the two idle T4s into ~2x evolution throughput. Genome TRAINING is independent and
     embarrassingly parallel, so it is threaded across the GPUs; genome GENERATION and INSERTION
@@ -64,6 +77,9 @@ def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=Non
             [cuda:0, cuda:1]).
         learning_rate: Adam learning rate for each genome.
         num_genomes: how many genomes to generate+train this call (default: len(devices)).
+        pdh: optional ProgressiveDynamicHurdles. If given, genomes are trained with hurdle-escalated
+            budgeting and a new hurdle may be created after each insertion; iterations/
+            batches_per_iteration in train_kwargs are then ignored.
         **train_kwargs: forwarded to genome.train (iterations, batches_per_iteration, batch_size,
             fitness_batches, use_amp).
 
@@ -78,14 +94,18 @@ def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=Non
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(devices)) as executor:
         futures = [
-            executor.submit(_train_one, genome, dataset, device, learning_rate, train_kwargs)
+            executor.submit(_train_one, genome, dataset, device, learning_rate, train_kwargs, pdh)
             for genome, device in zip(genomes, assigned_devices)
         ]
         trained = [future.result() for future in futures]  # re-raises any worker exception here
 
-    # insert sequentially (population is sorted/truncated by fitness on each insert)
+    # insert sequentially (population is sorted/truncated by fitness on each insert). With PDH, let
+    # the controller observe each insertion so it can create the next hurdle after models_per_hurdle
+    # genomes (main-thread only, so hurdle state stays consistent).
     for genome in trained:
         population.insert_genome(genome)
+        if pdh is not None:
+            pdh.observe(population.population)
 
     # release freed-but-cached GPU memory and defragment between generations -- across hundreds of
     # generations of varying-sized genomes the caching allocator fragments, which alone can cause
