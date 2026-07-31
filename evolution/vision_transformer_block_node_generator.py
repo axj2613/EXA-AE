@@ -13,11 +13,18 @@ from genomes.nodes.temporal_lstm_block_node import TemporalLSTMBlockNode
 from innovation.innovation_generator import InnovationGenerator
 
 
-ALL_NODE_TYPES = ("attention", "simple", "sequence_lstm", "temporal_lstm")
+# "temporal_lstm" is intentionally EXCLUDED from the pool: it recurs over the per-parcel temporal
+# axis, but the single-temporal-patch config (window == time_patch_size => num_temporal == 1) leaves
+# no temporal axis to recur over, so the node is degenerate -- and the HCP signal carries ~no
+# temporal structure at this patch size anyway (see docs/improvement_plan.md). Excluding it here
+# means an explicit request also raises "unknown node type" below, so it can never be selected.
+# Re-add "temporal_lstm" to re-enable if a run ever returns to multi-temporal-patch windows; the
+# constructor branch and the depth gating just below are kept ready for exactly that.
+ALL_NODE_TYPES = ("attention", "simple", "sequence_lstm")
 
-# TemporalLSTMBlockNode is the only depth-restricted type: it needs the full (parcel x
-# temporal-patch) grid that only exists in the decoder region (see its docstring), so it is
-# only offered at depth > 0.5.
+# TemporalLSTMBlockNode (when re-enabled) is the only depth-restricted type: it needs the full
+# (parcel x temporal-patch) grid that only exists in the decoder region (see its docstring), so it
+# would be offered only at depth > 0.5.
 _DECODER_ONLY_NODE_TYPES = frozenset({"temporal_lstm"})
 
 
