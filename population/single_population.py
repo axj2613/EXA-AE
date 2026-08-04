@@ -2,6 +2,8 @@ import random
 
 from genomes.genome import Genome
 
+from innovation.innovation_generator import InnovationGenerator
+
 from population.population_strategy import PopulationStrategy
 
 from reproduction.reproduction_selector import ReproductionSelector
@@ -25,6 +27,14 @@ class SinglePopulation(PopulationStrategy):
         self.population: list[Genome] = []
         self.seed_genome = seed_genome
         self.reproduction_selector = reproduction_selector
+
+        # A seed loaded from a pickle (e.g. pretrained_seed.pkl) carries innovation numbers from the
+        # session that built it, but a fresh evolution session's global InnovationGenerator counter
+        # starts at 0 -- so the first mutation-added node/edge would reuse a seed innovation number
+        # and trip the uniqueness assertion in Genome.add_node. Advance the counter past the seed.
+        # (No-op when the seed was just built in-session; the checkpoint-resume path restores the
+        # counter via load_checkpoint and never constructs a new SinglePopulation.)
+        InnovationGenerator.advance_past(seed_genome)
 
         # the seed genome will have a generation number of 0
         # and all other genomes will have incrementing generation
