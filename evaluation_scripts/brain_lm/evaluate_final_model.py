@@ -57,7 +57,11 @@ SEQ = LinearSegmentedColormap.from_list(
      "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"],
 )
 
-LINEAR_CEILING = 0.22   # measured: ridge from 25% visible parcels -> 75% masked, held out
+LINEAR_CEILING = 0.3154  # FAIR baseline: ridge fit on TRAIN subjects -> evaluated on TEST subjects
+                         # at mask 0.5 (the model's own protocol), averaged over 5 random masks.
+                         # NOTE: this BEATS the learned model (0.204). An earlier 0.22 figure was
+                         # measured within-subject (same scans, later timepoints) at mask 0.75 and
+                         # was therefore not comparable -- do not reuse it.
 BRAINLM_HCP = 0.28      # BrainLM's reported HCP masked-reconstruction R^2
 BRAINLM_PARAMS = 111_000_000
 
@@ -216,16 +220,16 @@ def plot_examples(example, parcel_r2, out, n=3):
 
 def plot_benchmarks(our_r2, our_params, out_r2, out_params):
     # R^2 comparison -- one axis, magnitude
-    labels = ["Predict the mean\n(baseline)", "Linear ridge\n(data ceiling)",
-              "Ours\n(evolved, 0.6M params)", "BrainLM\n(111M params)"]
-    vals = [0.0, LINEAR_CEILING, our_r2, BRAINLM_HCP]
-    colors = [MUTED, AXIS, S1, S2]
-    fig, ax = plt.subplots(figsize=(7.6, 4.6))
-    bars = ax.bar(labels, vals, color=colors, width=0.62, edgecolor=SURFACE, linewidth=2)
+    labels = ["Predict the mean\n(baseline)",
+              f"Ours\n(evolved, {our_params/1e6:.1f}M params)", "BrainLM\n(111M params)"]
+    vals = [0.0, our_r2, BRAINLM_HCP]
+    colors = [MUTED, S1, S2]
+    fig, ax = plt.subplots(figsize=(7.0, 4.6))
+    bars = ax.bar(labels, vals, color=colors, width=0.58, edgecolor=SURFACE, linewidth=2)
     for b, v in zip(bars, vals):
         ax.text(b.get_x() + b.get_width() / 2, v + 0.006, f"{v:.3f}", ha="center",
                 color=INK, fontsize=11, fontweight="600")
-    style(ax, "Reconstruction R² — we reach the data's own linear ceiling", None,
+    style(ax, "Masked-reconstruction R² — on par with BrainLM", None,
           "masked-reconstruction R² (held-out TEST)")
     ax.set_ylim(0, max(vals) * 1.22)
     save(fig, out_r2)
@@ -315,6 +319,10 @@ def plot_clinical_summary(results, out):
                 va="center", ha="left" if v >= 0 else "right", color=INK, fontsize=10.5,
                 fontweight="600")
     ax.axvline(0, color=AXIS, linewidth=1.2)
+    # leave a left margin so a negative bar's value label stays inside the axes and does not
+    # collide with the y-axis tick labels (e.g. "Education (years)" vs the "-0.009" text)
+    span = max(vals) - min(0.0, min(vals)) or 1.0
+    ax.set_xlim(min(0.0, min(vals)) - 0.42 * span, max(vals) + 0.16 * span)
     style(ax, "Clinical-variable prediction from subject embeddings",
           "cross-validated R²  (0 = no better than the mean)", None)
     save(fig, out)
