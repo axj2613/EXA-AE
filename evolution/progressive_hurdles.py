@@ -63,7 +63,7 @@ class ProgressiveDynamicHurdles:
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ training
-    def train(self, genome, dataset, optimizer, batch_size, fitness_batches, use_amp) -> "genome":
+    def train(self, genome, dataset, optimizer, batch_size, fitness_batches, use_amp):
         """Trains `genome` with hurdle-escalated budgeting, reusing `optimizer` across stages so
         momentum and the (Lamarckian-inherited) weights accumulate. Sets genome.fitness and stamps
         genome.pdh_stage / genome.pdh_steps for hurdle bookkeeping. The genome's own train() already
@@ -105,12 +105,19 @@ class ProgressiveDynamicHurdles:
             self._since_last_hurdle += 1
             if len(self.hurdles) >= self.max_hurdles or self._since_last_hurdle < self.models_per_hurdle:
                 return
+            # Hurdles gate TRAINING BUDGET and must be RECONSTRUCTION-MSE thresholds: escalation
+            # happens inside train() where only MSE is known (the Phase-3 clinical probe runs after).
+            # So read recon_fitness -- the preserved pure MSE -- not g.fitness, which may already carry
+            # the probe's clinical adjustment. Falls back to g.fitness when no probe is in use.
+            def recon(g):
+                return getattr(g, "recon_fitness", getattr(g, "fitness", None))
+
             members = [g for g in population
-                       if getattr(g, "fitness", None) is not None and math.isfinite(g.fitness)]
+                       if recon(g) is not None and math.isfinite(recon(g))]
             if not members:
                 return
             deepest = max(getattr(g, "pdh_stage", 0) for g in members)
-            at_deepest = [g.fitness for g in members if getattr(g, "pdh_stage", 0) == deepest]
+            at_deepest = [recon(g) for g in members if getattr(g, "pdh_stage", 0) == deepest]
             if not at_deepest:
                 return
             hurdle = sum(at_deepest) / len(at_deepest)

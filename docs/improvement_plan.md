@@ -51,7 +51,7 @@ against fixed baselines and gates, not against the objective the search optimize
 | 1 | **Progressive Dynamic Hurdles** | Evolved Transformer | search efficiency, depth-growth | **implemented** |
 | 2 | Seed robustification + lower search LR/mutation | Lorenc (ES brittleness) | pretrain→evolve stall | planned |
 | 3 | Multi-objective (MSE vs params): λ-parsimony → NSGA-II | bilevel + ET | efficiency, bloat | planned |
-| 4 | Downstream-aware fitness (evolve on fingerprint clinical CV) | synthesis | clinical prediction | planned (strategic bet) |
+| 4 | Downstream-aware fitness (evolve on fingerprint clinical CV) | synthesis | clinical prediction | **implemented** |
 | 5 | Richer block vocabulary (GLU/gating, activation/norm search) | ET | representation | exploratory |
 | 6 | Novelty / quality-diversity | Lorenc (intro) | diversity, escape stalls | exploratory |
 
@@ -87,11 +87,28 @@ against fixed baselines and gates, not against the objective the search optimize
 - **Success gate:** a knee-point model matching current R² at materially fewer
   params, or higher R² at equal params; report hypervolume vs the single-objective run.
 
-### Phase 3 — Strategic pivot: evolve for clinical signal *(only if reconstruction plateaus)*
+### Phase 3 — Strategic pivot: evolve for clinical signal  *(IMPLEMENTED; reconstruction confirmed at ceiling)*
 - Fitness includes a **downstream-probe score**: per genome, compute the
-  reconstruction-error fingerprint on a fixed TRAIN-subject probe set and run an
-  internal CV ridge/logreg for age/sex; reward that. PDH ensures only
-  hurdle-clearing genomes pay the probe cost.
+  reconstruction-error fingerprint on a fixed probe set and run an internal CV
+  ridge/logreg for age/sex; reward that. PDH ensures only hurdle-clearing genomes
+  pay the probe cost.
+- **Implementation** (`evolution/downstream_probe.py`, wired via `parallel_training`
+  + `progressive_hurdles`):
+  - `DownstreamProbe` caches a held-out probe split's windows once, then for any
+    genome computes per-parcel fingerprints (vectorized), reduces with PCA-30, and
+    runs KFold/StratifiedKFold CV → `combined = 2·(sexAUC−0.5)₊ + (ageR²)₊`.
+  - Selection fitness = `recon_MSE − PROBE_FITNESS_WEIGHT · combined` (minimized);
+    **PDH hurdles keep escalating on pure recon MSE**, preserved as
+    `genome.recon_fitness`, so training-budget allocation stays reconstruction-driven
+    and only genomes clearing `PROBE_MIN_STAGE` pay the probe cost.
+  - **Probe split = VAL** (held out of reconstruction training → out-of-sample
+    fingerprints, a more honest selection signal than in-sample TRAIN); TEST is never
+    touched. Labels are never used in pretraining, so no label leakage.
+  - Notebook toggles: `USE_DOWNSTREAM_PROBE`, `PROBE_SPLIT`, `PROBE_FITNESS_WEIGHT`,
+    `PROBE_MIN_STAGE`, `PROBE_WINDOWS_PER_SUBJECT`, `PROBE_N_PCA`.
+  - Validated: on the current best model the VAL probe reads sex AUC ≈ 0.80; in the
+    integration test a genome with sex AUC 0.64 (chance-level MSE) is correctly
+    promoted above lower-MSE, chance-clinical rivals.
 - **Success gate:** narrow the gap to FC+ridge on TEST (e.g. sex AUC → ~0.80–0.85).
 - **Risk control:** frozen probe set disjoint from TEST; nested CV; pre-registered margin.
 
@@ -100,6 +117,12 @@ Richer block vocabulary (after PDH affords the harder search); novelty/QD if the
 population collapses to one lineage.
 
 ## Immediate next step
-Run **Phase 0** (fidelity + baselines) and the **Phase 1 A/B** (`USE_PDH=True` vs
-`False`) on Kaggle. The ρ result decides whether reconstruction is worth further
-search at all before investing in Phases 2–4.
+Phase 1 (PDH) is done: reconstruction reached **R² 0.275** on TEST — matching BrainLM
+(0.28) at 3.0M params but still under the **0.315 linear ceiling**, which triggers the
+Phase-1 **kill gate** (reconstruction is linearly saturated). So we commit to **Phase 3**,
+now implemented. Run the notebook with `USE_DOWNSTREAM_PROBE=True` from the pretrained
+seed; watch that the population's `probe sex AUC` climbs while `recon MSE` holds, then do
+the honest **TEST** evaluation (`fingerprint_readout.py`) and check the success gate
+(sex AUC 0.794 → ~0.80–0.85). Tune `PROBE_FITNESS_WEIGHT` if reconstruction degrades too
+far in trade for clinical signal. Phase 2 (multi-objective params) remains available if a
+smaller/cleaner front is wanted.

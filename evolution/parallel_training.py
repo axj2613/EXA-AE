@@ -3,11 +3,12 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import gc
+import math
 
 import torch
 
 
-def _train_one(genome, dataset, device, learning_rate, train_kwargs, pdh=None):
+def _train_one(genome, dataset, device, learning_rate, train_kwargs, pdh=None, probe=None):
     """Moves a genome to its assigned device, builds a fresh optimizer, and trains it. Runs in a
     worker thread. Distinct genomes share no mutable state (each owns its own modules/tensors on
     its own device); the only shared object is the dataset, whose sampling is lock-guarded.
@@ -44,6 +45,27 @@ def _train_one(genome, dataset, device, learning_rate, train_kwargs, pdh=None):
                 )
             else:
                 genome.train(dataset=dataset, optimizer=optimizer, **train_kwargs)
+
+            # Phase 3: fold a downstream CLINICAL score into the selection fitness. genome.fitness is
+            # currently pure reconstruction MSE -- preserve it as recon_fitness (PDH keeps escalating
+            # on THAT), then set the selection fitness to recon_MSE - weight*clinical. Only score
+            # genomes that reconstruct finitely and (under PDH) cleared >= min_stage, so only
+            # hurdle-clearers pay the probe cost. See evolution.downstream_probe.
+            if probe is not None and math.isfinite(genome.fitness):
+                genome.recon_fitness = float(genome.fitness)
+                stage = getattr(genome, "pdh_stage", None)
+                if pdh is None or stage is None or stage >= probe.min_stage:
+                    s = probe.score(genome, device)
+                    genome.probe_sex_auc = s["sex_auc"]
+                    genome.probe_age_r2 = s["age_r2"]
+                    genome.probe_score = s["combined"]
+                    genome.fitness = genome.recon_fitness - probe.fitness_weight * s["combined"]
+                    print(f"[probe] genome {genome.generation_number}: sex_auc {s['sex_auc']:.3f} "
+                          f"age_r2 {s['age_r2']:+.3f} -> fitness {genome.recon_fitness:.4f} "
+                          f"- {probe.fitness_weight}*{s['combined']:.3f} = {genome.fitness:.4f}")
+                else:
+                    genome.probe_score = 0.0  # not deep enough to earn a probe; ranked on MSE
+                genome.reset()  # clear node .value set by the probe's forward passes before pickling
         except torch.cuda.OutOfMemoryError:
             genome.fitness = float("inf")
             genome.complexity = genome.parameter_report()
@@ -57,7 +79,8 @@ def _train_one(genome, dataset, device, learning_rate, train_kwargs, pdh=None):
     return genome
 
 
-def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=None, pdh=None, **train_kwargs):
+def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=None, pdh=None,
+                    probe=None, **train_kwargs):
     """Generates a small batch of genomes and trains them concurrently, one per device -- turning
     the two idle T4s into ~2x evolution throughput. Genome TRAINING is independent and
     embarrassingly parallel, so it is threaded across the GPUs; genome GENERATION and INSERTION
@@ -94,7 +117,7 @@ def evolve_parallel(population, dataset, devices, learning_rate, num_genomes=Non
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(devices)) as executor:
         futures = [
-            executor.submit(_train_one, genome, dataset, device, learning_rate, train_kwargs, pdh)
+            executor.submit(_train_one, genome, dataset, device, learning_rate, train_kwargs, pdh, probe)
             for genome, device in zip(genomes, assigned_devices)
         ]
         trained = [future.result() for future in futures]  # re-raises any worker exception here

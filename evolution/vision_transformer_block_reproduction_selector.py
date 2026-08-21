@@ -33,10 +33,15 @@ class VisionTransformerBlockReproductionSelector(ReproductionSelector):
 
     AddRecurrentEdge is deliberately excluded: it specifically requests a NEW recurrent (time_skip
     > 0) connection between two existing nodes, and that operation has no meaning for BlockEdges,
-    which are always feed-forward (see BlockEdge's docstring). Note this is different from
-    AddNode's internal edge-wiring, which unconditionally tries both a recurrent and a
-    non-recurrent edge when attaching a freshly added node -- VisionTransformerBlockEdgeGenerator
-    handles that case by simply ignoring the `recurrent` flag, so AddNode itself is safe to keep.
+    which are always feed-forward (see BlockEdge's docstring).
+
+    Recurrent edge-wiring is also disabled inside AddNode and Crossover via `allow_recurrent=False`.
+    Those operators otherwise wire each new/orphaned node with both a recurrent and a non-recurrent
+    edge pass; since BlockEdges have no recurrence, the recurrent pass only ever produces
+    backward/same-depth edges that VisionTransformerBlockGenome's forward graph drops as inert --
+    graph clutter with no functional effect. Skipping it keeps evolved genomes strictly feed-forward
+    (the non-recurrent pass still guarantees at least one input and one output edge). Pass
+    allow_recurrent=True to restore the old both-passes behavior.
     """
 
     def __init__(
@@ -44,6 +49,7 @@ class VisionTransformerBlockReproductionSelector(ReproductionSelector):
         node_generator: NodeGenerator,
         edge_generator: EdgeGenerator,
         weight_generator: WeightGenerator,
+        allow_recurrent: bool = False,
     ):
         super().__init__(
             node_generator=node_generator,
@@ -57,7 +63,8 @@ class VisionTransformerBlockReproductionSelector(ReproductionSelector):
             DisableEdge(node_generator, edge_generator, weight_generator),
             EnableEdge(node_generator, edge_generator, weight_generator),
             SplitEdge(node_generator, edge_generator, weight_generator),
-            AddNode(node_generator, edge_generator, weight_generator, autoencoder),
+            AddNode(node_generator, edge_generator, weight_generator, autoencoder,
+                    allow_recurrent=allow_recurrent),
             EnableNode(node_generator, edge_generator, weight_generator),
             DisableNode(node_generator, edge_generator, weight_generator, autoencoder),
             MergeNode(node_generator, edge_generator, weight_generator, autoencoder),
@@ -67,7 +74,8 @@ class VisionTransformerBlockReproductionSelector(ReproductionSelector):
             # Crossover returns None whenever fewer than number_parents genomes are available, so
             # 10 would silently never fire for the small populations this genome type uses (the
             # scalar path only gets away with 10 because its population is hardcoded to 50).
-            Crossover(node_generator, edge_generator, weight_generator, autoencoder, number_parents=2),
+            Crossover(node_generator, edge_generator, weight_generator, autoencoder, number_parents=2,
+                      allow_recurrent=allow_recurrent),
         ]
 
     def __call__(self) -> ReproductionMethod:

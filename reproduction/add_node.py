@@ -22,12 +22,20 @@ class AddNode(ReproductionMethod):
         edge_generator: EdgeGenerator,
         weight_generator: WeightGenerator,
         autoencoder: bool,
+        allow_recurrent: bool = True,
     ):
         """Initialize a new AddNode reproduction method.
         Args:
             node_generator: is used to generate a new node (perform the node type selection).
             edge_generator: is used to generate a new edge (perform the edge type selection).
             weight_generator: is used to initialize weights for newly generated nodes and edges.
+            allow_recurrent: when False, the new node is wired with feed-forward edges ONLY -- the
+                recurrent edge-wiring pass is skipped. Defaults to True to preserve behavior for the
+                scalar RNN cell types (which genuinely use recurrent connections). Set False for
+                genomes whose edges have no recurrence concept (e.g. VisionTransformerBlockGenome's
+                BlockEdges), where the recurrent pass only produces backward/same-depth edges that
+                the forward graph drops as inert -- pure clutter. Feed-forward connectivity is still
+                guaranteed because the non-recurrent pass forces at least one input and output edge.
         """
         super().__init__(
             node_generator=node_generator,
@@ -35,6 +43,7 @@ class AddNode(ReproductionMethod):
             weight_generator=weight_generator,
             autoencoder=autoencoder,
         )
+        self.allow_recurrent = allow_recurrent
 
     def number_parents(self):
         """
@@ -71,8 +80,9 @@ class AddNode(ReproductionMethod):
         # edge as an input and as an output
         require_recurrent = AddNode.get_require_recurrent()
 
-        # add recurrent and non-recurrent edges for the node
-        for recurrent in [True, False]:
+        # add recurrent and non-recurrent edges for the node (feed-forward only when
+        # allow_recurrent is False -- see __init__ docstring)
+        for recurrent in ([True, False] if self.allow_recurrent else [False]):
             AddNode.add_input_edges(
                 target_node=new_node,
                 genome=child_genome,

@@ -24,12 +24,16 @@ class Crossover(ReproductionMethod):
         number_parents: int = 2,
         best_parent_selection_rate: float = 1.0,
         other_parent_selection_rate: float = 0.5,
+        allow_recurrent: bool = True,
     ):
         """Initialies a new Crossover reproduction method.
         Args:
             node_generator: is used to generate a new node (perform the node type selection).
             edge_generator: is used to generate a new edge (perform the edge type selection).
             weight_generator: is used to initialize weights for newly generated nodes and edges.
+            allow_recurrent: when False, orphaned nodes are re-wired with feed-forward edges ONLY
+                (the recurrent edge-wiring pass is skipped). Mirrors AddNode.allow_recurrent; see its
+                docstring. Defaults to True to preserve the scalar RNN path.
         """
         super().__init__(
             node_generator=node_generator,
@@ -39,6 +43,7 @@ class Crossover(ReproductionMethod):
         )
 
         self._number_parents = number_parents
+        self.allow_recurrent = allow_recurrent
         self.best_parent_selection_rate = best_parent_selection_rate
         self.other_parent_selection_rate = other_parent_selection_rate
 
@@ -190,7 +195,7 @@ class Crossover(ReproductionMethod):
                 )
 
                 require_recurrent = AddNode.get_require_recurrent()
-                for recurrent in [True, False]:
+                for recurrent in ([True, False] if self.allow_recurrent else [False]):
                     AddNode.add_input_edges(
                         target_node=node,
                         genome=child_genome,
@@ -208,7 +213,7 @@ class Crossover(ReproductionMethod):
                 )
 
                 require_recurrent = AddNode.get_require_recurrent()
-                for recurrent in [True, False]:
+                for recurrent in ([True, False] if self.allow_recurrent else [False]):
                     AddNode.add_output_edges(
                         target_node=node,
                         genome=child_genome,
