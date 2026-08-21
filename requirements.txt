@@ -1,9 +1,17 @@
+# Core: neuro-evolution + self-supervised ViT-MAE training
 numpy<2.0
 torch
-loguru
-matplotlib
 pandas
+matplotlib
+loguru
 graphviz
 
+# Evaluation + behavioral analysis (evaluation_scripts/)
+scikit-learn
+scipy
+umap-learn
+nilearn
+
+# HCP data sync (scripts/sync_hcp_from_s3.py) + Kaggle progress bars
 boto3
 tqdm
